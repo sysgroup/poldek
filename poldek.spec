@@ -17,7 +17,7 @@
 
 %define		gitref	473ca93bb156f646e7e0f413370ebf6e3a6c400c
 %define		snap	20261113
-%define		rel	0.2
+%define		rel	0.3
 # poldek's autogen.sh and CI build against trurlib and tndb master
 %define		trurlib_gitref	f6c8d5afcb2c53fa97e02c8b3c9b77bdae5179c4
 %define		tndb_gitref	27a90b4cca45533e84afc57e0a9654dfbf0120d1
@@ -53,6 +53,7 @@ Source102:	%{name}-debuginfo-snap.conf
 Patch0:		%{name}-config.patch
 Patch1:		pm-hooks.patch
 Patch2:		%{name}-ext-down-enable.patch
+Patch3:		poldek-log-file-config.patch
 URL:		http://poldek.pld-linux.org/
 BuildRequires:	autoconf >= 2.63
 BuildRequires:	automake >= 1:1.11
@@ -219,9 +220,10 @@ rmdir trurlib tndb
 %{__mv} trurlib-%{trurlib_gitref} trurlib
 %{__mv} tndb-%{tndb_gitref} tndb
 
-# conf/*.conf are generated from doc/poldek.conf.xml and make regenerates them
-# when the xml is newer, so generate them after any patch to the xml and apply
-# the PLD defaults (Patch0-2) to the result
+# Apply source-level changes before generating configuration files from XML.
+%patch -P3 -p1
+
+# Generate configuration files from the patched XML, then apply PLD defaults.
 cd conf
 for c in fetch source poldek; do
 	%{__sh} ../doc/conf-xml2.sh conf ../doc/poldek.conf.xml $c

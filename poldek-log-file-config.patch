@@ -1,0 +1,164 @@
+--- a/cli/main.c
++++ b/cli/main.c
+@@ -128,7 +128,9 @@
+ {"version", OPT_BANNER, 0, OPTION_HIDDEN,
+      N_("Display program version information and exit"), OPT_GID },
+ 
+-{"log", OPT_LOG, "FILE", 0, N_("Log program messages to FILE"), OPT_GID },
++{"log", OPT_LOG, "FILE", 0,
++     N_("Log program messages to FILE (overrides 'log file' configuration)"),
++     OPT_GID },
+ {"runas", OPT_RUNAS, "USER", 0, N_("Run program as user USER"), OPT_GID },
+ {NULL, OPT_OPTION, "OPTION=VALUE", 0, N_("Set configuration option"), OPT_GID },
+ {"docbook", OPT_DOCB, 0, OPTION_HIDDEN,
+--- a/lib_init.c
++++ b/lib_init.c
+@@ -52,6 +52,7 @@
+ #define CACHEDIR_SETUPDONE  (1 << 2)
+ #define SOURCES_LOADED      (1 << 3)
+ #define SETUP_DONE          (1 << 4)
++#define LOGFILE_SETUPDONE   (1 << 5)
+ 
+ 
+ #ifdef VERSION_STATUS
+@@ -1070,9 +1071,14 @@
+     if (ctx->htconf == NULL)
+         return 0;
+ 
++    htcnf = poldek_conf_get_section(ctx->htconf, "global");
++    /* --log configures an appender while command-line options are parsed. */
++    if ((ctx->_iflags & LOGFILE_SETUPDONE) == 0 &&
++        (vs = poldek_conf_get(htcnf, "log file", NULL)))
++        poldek_configure(ctx, POLDEK_CONF_LOGFILE, (char *)vs);
++
+     poldek__ts_apply_config(ctx, ctx->ts);
+ 
+-    htcnf = poldek_conf_get_section(ctx->htconf, "global");
+     register_vf_handlers_compat(htcnf);
+     register_vf_handlers(poldek_conf_get_sections(ctx->htconf, "fetcher"));
+ 
+@@ -1317,6 +1323,7 @@
+         case POLDEK_CONF_LOGFILE:
+             if ((vs = va_arg(ap, char*))) {
+                 FILE *stream = fopen(vs, "a");
++                ctx->_iflags |= LOGFILE_SETUPDONE;
+                 if (stream == NULL) {
+                     log(LOGERR, "%s: open failed: %m", vs);
+                     rc = 0;
+--- a/doc/poldek.conf.xml
++++ b/doc/poldek.conf.xml
+@@ -210,6 +210,21 @@
+     </description>
+   </option>
+ 
++  <option name="log file" type="string" value="/var/log/poldek.log" multiple="no">
++    <description>
++    Append program messages to this file. Logging is disabled unless this option
++    is set. The command-line [option]--log=FILE[/option] option overrides this
++    value, while [option]--noconf[/option] ignores it. The file is opened in
++    append mode.
++
++    Use an absolute path. The log file and its parent directory must be
++    administered securely; if [option]runas[/option] is enabled, grant write
++    access to that account rather than making the path world-writable. Program
++    messages can include repository URLs and package names, so restrict read
++    access appropriately.
++    </description>
++  </option>
++
+   <option name="runas" type="string" default="" value="poldek">
+     <description>
+      Switch to ordinary user at startup when executed by root
+--- a/doc/manual/ref2100-miscellaneous_options.xml
++++ b/doc/manual/ref2100-miscellaneous_options.xml
+@@ -79,7 +79,7 @@
+ <varlistentry><term><option id="ref.cmdl.log">--log=FILE </option></term>
+   <listitem>
+    <para>
+-      Log program messages to FILE
++      Log program messages to FILE (overrides 'log file' configuration)
+    </para>
+   </listitem>
+ </varlistentry>
+--- a/tests/sh/08-rpm
++++ b/tests/sh/08-rpm
+@@ -900,6 +900,79 @@
+     rpm_state_check "a" ""
+ }
+ 
++# A configured log file is used once, and --log overrides it rather than
++# adding a second appender. --noconf ignores the configured value.
++testLogFileConfigurationAndCliOverride() {
++    skip_if_rpm_testing_off && return
++    local conf=$TMPDIR/poldek-log.conf configured_log=$TMPDIR/configured.log
++    local cli_log=$TMPDIR/cli.log wrapper=$TMPDIR/rpm-wrapper use_sudo=n
++
++    [ -n "$SUDO" ] && use_sudo=y
++    cat > "$conf" <<EOF
++[global]
++log file = $configured_log
++EOF
++    rm -f "$configured_log" "$cli_log"
++
++    cat > "$wrapper" <<EOF
++#!/bin/sh
++printf 'configured\n'
++exec "$(command -v rpm)" "\$@"
++EOF
++    chmod +x "$wrapper"
++
++    build a 1-1
++    $POLDEK --conf "$conf" --cachedir "$CACHEDIR" \
++        -Ouse_sudo=$use_sudo -Odependency_solver=$DEPENDENCY_SOLVER \
++        -Oupgrade_multiple_instances=y --noask \
++        --st dir -s "$REPO" --root "$DESTINATION_REPO" --justdb \
++        --pmcmd "$wrapper" -uv a
++    assertEquals "install with configured log failed" "0" "$?"
++    grep -q " rpm: configured$" "$configured_log" ||
++        fail "configured log did not receive rpm output"
++    rpm_state_check "a" ""
++
++    cat > "$wrapper" <<EOF
++#!/bin/sh
++printf 'overridden\n'
++exec "$(command -v rpm)" "\$@"
++EOF
++    chmod +x "$wrapper"
++
++    build b 1-1
++    $POLDEK --conf "$conf" --log "$cli_log" --cachedir "$CACHEDIR" \
++        -Ouse_sudo=$use_sudo -Odependency_solver=$DEPENDENCY_SOLVER \
++        -Oupgrade_multiple_instances=y --noask \
++        --st dir -s "$REPO" --root "$DESTINATION_REPO" --justdb \
++        --pmcmd "$wrapper" -uv b
++    assertEquals "install with CLI log failed" "0" "$?"
++    grep -q " rpm: overridden$" "$cli_log" ||
++        fail "CLI log did not receive rpm output"
++    if grep -q " rpm: overridden$" "$configured_log"; then
++        fail "CLI log did not override configured log"
++    fi
++    rpm_state_check "b" ""
++
++    cat > "$wrapper" <<EOF
++#!/bin/sh
++printf 'noconf\n'
++exec "$(command -v rpm)" "\$@"
++EOF
++    chmod +x "$wrapper"
++
++    build c 1-1
++    $POLDEK --noconf --conf "$conf" --cachedir "$CACHEDIR" \
++        -Ouse_sudo=$use_sudo -Odependency_solver=$DEPENDENCY_SOLVER \
++        -Oupgrade_multiple_instances=y --noask \
++        --st dir -s "$REPO" --root "$DESTINATION_REPO" --justdb \
++        --pmcmd "$wrapper" -uv c
++    assertEquals "install with --noconf failed" "0" "$?"
++    if grep -q " rpm: noconf$" "$configured_log"; then
++        fail "--noconf did not ignore the configured log"
++    fi
++    rpm_state_check "c" ""
++}
++
+ # a parent that ignores SIGCHLD, as a Perl daemon with $SIG{CHLD} = 'IGNORE',
+ # passes it on to poldek; a failed rpm run still fails the install
+ testInstallRpmFailureWithSigchldIgnored() {
